@@ -33,6 +33,9 @@
 #   sudo yum install libxml2-devel 
 #   sudo easy_install lxml
 #
+#Pre-requisites : python-daemon
+#	sudo yum install python-daemon
+#
 # To Do:
 #  Refactor into proper functions/procs
 #  Error handling
@@ -47,6 +50,7 @@ import socket
 from glob import glob
 from optparse import OptionParser
 from lxml import objectify
+import daemon
 
 def parse_xml(xml):
 	metrics_msg = []
@@ -305,106 +309,109 @@ def parse_files():
 
 ###########################################
 
+def run():
+	with daemon.DaemonContext():
+		# Internal Variable initialisations
+		valid_xml=float(0)
+		invalid_xml=float(0)
 
+		opmn_cmds = ['coreapplication_obips1' ,'coreapplication_obis1','opmn']
+		#opmn_cmds = ['coreapplication_obips2' ,'coreapplication_obis2','coreapplication_obips1' ,'coreapplication_obis1','opmn']
 
-# Internal Variable initialisations
-valid_xml=float(0)
-invalid_xml=float(0)
+		# OptionParser is depreciated in Python 2.7, but used here for compatibility with Python 2.4 (the version distributed with OEL 5.5)
+		# NB it does not support newlines (\n) but these are included for when I figure out how to implement them
+		opts = OptionParser()
+		opts.description = "obi-metrics-agent will can extract metric data from Fusion MiddleWare (FMW) and its Dynamic Monitoring Systems (DMS).\nIt will poll at a predefined interval and parse the resulting set of metrics.\nThe metrics can be output to a variety of formats, including CSV. Sending to Carbon is also supported, from where graphs can be rendered in Graphite."
+		# epilog doesn't display, why?
+		opts.epilog = ("Developed by @rmoff / Rittman Mead (http://www.rittmanmead.com)           Absolutely no warranty, use at your own risk                                         Please include this notice in any copy or reuse of the script you make ")
+		opts.add_option("-o","--output",action="store",dest="outputformat",default="csv",help="The output format(s) of data, comma separated. More than one can be specified.\nUnparsed options: raw, xml\nParsed options: csv , carbon, sql")
+		opts.add_option("-d","--data-directory",action="store",dest="DATA",default="./data",help="The directory to which data files are written. Not needed if sole output is carbon.")
+		opts.add_option("-p","--parse-only",action="store_true",dest="parse_only",default=False, help="If specified, then all raw and xml files specified in the data-directory will be processed, and output to the specified format(s)\nSelecting this option will disable collection of metrics.")
+		opts.add_option("--fmw-instance",action="store",dest="FMW_INSTANCE",help="Optional. The name of a particular FMW instance. This will be prefixed to metric names.")
+		opts.add_option("--carbon-server",action="store",dest="CARBON_SERVER",help="The host or IP address of the Carbon server. Required if output format 'carbon' specified.")
+		opts.add_option("--carbon-port",action="store",dest="CARBON_PORT",default=2003,help="Alternative carbon port, if not 2003.")
+		opts.add_option("-i","--interval",action="store",dest="interval",default=5,help="The interval in seconds between metric samples.")
+		opts.add_option("--opmnbin",action="store",dest="OPMN_BIN",help="The complete path to opmnctl. Watch out for spaces.")
 
-opmn_cmds = ['coreapplication_obips1' ,'coreapplication_obis1','opmn']
-#opmn_cmds = ['coreapplication_obips2' ,'coreapplication_obis2','coreapplication_obips1' ,'coreapplication_obis1','opmn']
+		input_opts , args = opts.parse_args()
 
-# OptionParser is depreciated in Python 2.7, but used here for compatibility with Python 2.4 (the version distributed with OEL 5.5)
-# NB it does not support newlines (\n) but these are included for when I figure out how to implement them
-opts = OptionParser()
-opts.description = "obi-metrics-agent will can extract metric data from Fusion MiddleWare (FMW) and its Dynamic Monitoring Systems (DMS).\nIt will poll at a predefined interval and parse the resulting set of metrics.\nThe metrics can be output to a variety of formats, including CSV. Sending to Carbon is also supported, from where graphs can be rendered in Graphite."
-# epilog doesn't display, why?
-opts.epilog = ("Developed by @rmoff / Rittman Mead (http://www.rittmanmead.com)           Absolutely no warranty, use at your own risk                                         Please include this notice in any copy or reuse of the script you make ")
-opts.add_option("-o","--output",action="store",dest="outputformat",default="csv",help="The output format(s) of data, comma separated. More than one can be specified.\nUnparsed options: raw, xml\nParsed options: csv , carbon, sql")
-opts.add_option("-d","--data-directory",action="store",dest="DATA",default="./data",help="The directory to which data files are written. Not needed if sole output is carbon.")
-opts.add_option("-p","--parse-only",action="store_true",dest="parse_only",default=False, help="If specified, then all raw and xml files specified in the data-directory will be processed, and output to the specified format(s)\nSelecting this option will disable collection of metrics.")
-opts.add_option("--fmw-instance",action="store",dest="FMW_INSTANCE",help="Optional. The name of a particular FMW instance. This will be prefixed to metric names.")
-opts.add_option("--carbon-server",action="store",dest="CARBON_SERVER",help="The host or IP address of the Carbon server. Required if output format 'carbon' specified.")
-opts.add_option("--carbon-port",action="store",dest="CARBON_PORT",default=2003,help="Alternative carbon port, if not 2003.")
-opts.add_option("-i","--interval",action="store",dest="interval",default=5,help="The interval in seconds between metric samples.")
-opts.add_option("--opmnbin",action="store",dest="OPMN_BIN",help="The complete path to opmnctl. Watch out for spaces.")
-
-input_opts , args = opts.parse_args()
-
-try:
-	interval = int(input_opts.interval)
-	output=input_opts.outputformat
-	parse_only= input_opts.parse_only
-	DATA = input_opts.DATA
-	FMW_INSTANCE = input_opts.FMW_INSTANCE
-	CARBON_SERVER = input_opts.CARBON_SERVER
-	CARBON_PORT = int(input_opts.CARBON_PORT)
-	OPMN_BIN = input_opts.OPMN_BIN
-except Exception, err:
-	sys.stderr.write('\t**Error reading input options: %s\n' % str(err))
-	sys.exit()
-
-if FMW_INSTANCE is not None:
-	FMW_INSTANCE = FMW_INSTANCE.upper()
-
-# For several of the variables, it would be good to fall back on the environment variable if it exists. Maybe put the env var check before the add_option and use the env var if it exists as the default= value
-
-# If OPMN_BIN isn't specified, then try and check the environment variables
-if not parse_only:
-	if OPMN_BIN is None: 
 		try:
-			OPMN_BIN = os.environ['OPMN_BIN']
-		except:
-			# Try a default path
-			OPMN_BIN = '/u01/app/oracle/product/fmw/instances/instance1/bin/opmnctl'
-			if not os.path.isfile(OPMN_BIN):
-				print 'OPMN_BIN must be defined as an environment variable.\nIt can alternatively be specified by the command line parameter --opmnbin.'
-				print '\nSet manually, or update setEnv.sh and run it (. ./setEnv.sh)'
-				print '*** Exiting ***'
-				sys.exit()
-	else:
-		if os.path.isdir(OPMN_BIN):
-			OPMN_BIN = OPMN_BIN + '/opmnctl'
-do_output_raw = (output.find('raw') > -1)
-do_output_csv = (output.find('csv') > -1)
-do_output_xml = (output.find('xml') > -1)
-do_output_carbon= (output.find('carbon') > -1)
-do_output_sql= (output.find('sql') > -1)
+			interval = int(input_opts.interval)
+			output=input_opts.outputformat
+			parse_only= input_opts.parse_only
+			DATA = input_opts.DATA
+			FMW_INSTANCE = input_opts.FMW_INSTANCE
+			CARBON_SERVER = input_opts.CARBON_SERVER
+			CARBON_PORT = int(input_opts.CARBON_PORT)
+			OPMN_BIN = input_opts.OPMN_BIN
+		except Exception, err:
+			sys.stderr.write('\t**Error reading input options: %s\n' % str(err))
+			sys.exit()
 
-if do_output_carbon and (CARBON_SERVER is None):
-	sys.stderr.write('\n\t** Carbon server must be specified if carbon output is selected. \n\tUse --carbon-server and optionally --carbon-port (defaults to 2003)\n\n')
-	sys.exit()
+		if FMW_INSTANCE is not None:
+			FMW_INSTANCE = FMW_INSTANCE.upper()
 
-# Print header and variable states
-print '\n\n\t\tobi-metrics-agent.py\n\n\n'
-print '# ==================================================================='
-print '# Developed by @rmoff / Rittman Mead (http://www.rittmanmead.com)'
-print '# Absolutely no warranty, use at your own risk'
-print '# Please include this notice in any copy or reuse of the script you make'
-print '# ==================================================================='
-print '\n\n---------------------------------------'
-print 'Output format             : %s' % output
-print 'raw/csv/xml/carbon/sql    : %s/%s/%s/%s/%s' % (do_output_raw,do_output_csv,do_output_xml,do_output_carbon,do_output_sql)
-print 'Data dir                  : %s' % DATA
-print 'FMW instance              : %s' % FMW_INSTANCE
-print 'OPMN BIN                  : %s' % OPMN_BIN
-if do_output_carbon:
-	print 'Carbon server             : %s' % CARBON_SERVER
-	print 'Carbon port               : %d' % CARBON_PORT
-if parse_only:
-	print '\n\nOption parse_only selected, so no metrics will be gathered. \nThe program will process all data files (xml and raw), and then exit'
-else:
-	print 'Sample interval (seconds) : %d' % interval
-print '---------------------------------------\n'
+		# For several of the variables, it would be good to fall back on the environment variable if it exists. Maybe put the env var check before the add_option and use the env var if it exists as the default= value
 
-if not os.path.exists(DATA):
-	print '\n\t%s does not exist ... creating' % (DATA)
-	os.makedirs(DATA)
+		# If OPMN_BIN isn't specified, then try and check the environment variables
+		if not parse_only:
+			if OPMN_BIN is None: 
+				try:
+					OPMN_BIN = os.environ['OPMN_BIN']
+				except:
+					# Try a default path
+					OPMN_BIN = '/u01/app/oracle/product/fmw/instances/instance1/bin/opmnctl'
+					if not os.path.isfile(OPMN_BIN):
+						print 'OPMN_BIN must be defined as an environment variable.\nIt can alternatively be specified by the command line parameter --opmnbin.'
+						print '\nSet manually, or update setEnv.sh and run it (. ./setEnv.sh)'
+						print '*** Exiting ***'
+						sys.exit()
+			else:
+				if os.path.isdir(OPMN_BIN):
+					OPMN_BIN = OPMN_BIN + '/opmnctl'
+		do_output_raw = (output.find('raw') > -1)
+		do_output_csv = (output.find('csv') > -1)
+		do_output_xml = (output.find('xml') > -1)
+		do_output_carbon= (output.find('carbon') > -1)
+		do_output_sql= (output.find('sql') > -1)
 
-# Check process list for collectl?
-# print '\n\n   **Don''t forget to start collectl**'
+		if do_output_carbon and (CARBON_SERVER is None):
+			sys.stderr.write('\n\t** Carbon server must be specified if carbon output is selected. \n\tUse --carbon-server and optionally --carbon-port (defaults to 2003)\n\n')
+			sys.exit()
 
-if parse_only:
-	parse_files()
-else:
-	collect_metrics()
+		# Print header and variable states
+		print '\n\n\t\tobi-metrics-agent.py\n\n\n'
+		print '# ==================================================================='
+		print '# Developed by @rmoff / Rittman Mead (http://www.rittmanmead.com)'
+		print '# Absolutely no warranty, use at your own risk'
+		print '# Please include this notice in any copy or reuse of the script you make'
+		print '# ==================================================================='
+		print '\n\n---------------------------------------'
+		print 'Output format             : %s' % output
+		print 'raw/csv/xml/carbon/sql    : %s/%s/%s/%s/%s' % (do_output_raw,do_output_csv,do_output_xml,do_output_carbon,do_output_sql)
+		print 'Data dir                  : %s' % DATA
+		print 'FMW instance              : %s' % FMW_INSTANCE
+		print 'OPMN BIN                  : %s' % OPMN_BIN
+		if do_output_carbon:
+			print 'Carbon server             : %s' % CARBON_SERVER
+			print 'Carbon port               : %d' % CARBON_PORT
+		if parse_only:
+			print '\n\nOption parse_only selected, so no metrics will be gathered. \nThe program will process all data files (xml and raw), and then exit'
+		else:
+			print 'Sample interval (seconds) : %d' % interval
+		print '---------------------------------------\n'
+
+		if not os.path.exists(DATA):
+			print '\n\t%s does not exist ... creating' % (DATA)
+			os.makedirs(DATA)
+
+		# Check process list for collectl?
+		# print '\n\n   **Don''t forget to start collectl**'
+
+		if parse_only:
+			parse_files()
+		else:
+			collect_metrics()
+			
+if __name__ == "__main__":
+    run()
